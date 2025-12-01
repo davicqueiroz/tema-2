@@ -1,0 +1,418 @@
+// survival_island.c
+// Compilar: gcc survival_island.c -std=c11 -O2 -Wall -o survival
+// Rodar: ./survival
+//
+// Mini-game "Sobrevivência na Ilha" - inventário como vetor (array) e lista encadeada.
+// Implementa Selection Sort, Busca Binária, comparação de contagens de operações,
+// e uma simulação em 3 fases que culmina na "construção da torre de fuga".
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+
+#define MAX_NAME 64
+
+typedef enum {
+    IT_FOOD,
+    IT_WEAPON,
+    IT_TOOL,
+    IT_MISC
+} ItemType;
+
+const char *ItemTypeNames[] = {"Food", "Weapon", "Tool", "Misc"};
+
+typedef struct {
+    char name[MAX_NAME];
+    ItemType type;
+    int priority; // menor = mais importante (1 = alta prioridade)
+    int quantity;
+} Item;
+
+/* -----------------------
+   INVENTÁRIO - VETOR (ARRAY DINÂMICO)
+   ----------------------- */
+
+typedef struct {
+    Item *items;
+    size_t size;
+    size_t capacity;
+} InventoryArray;
+
+InventoryArray *inv_array_create(size_t initial_capacity) {
+    InventoryArray *a = malloc(sizeof(InventoryArray));
+    if (!a) return NULL;
+    a->items = calloc(initial_capacity, sizeof(Item));
+    a->size = 0;
+    a->capacity = initial_capacity;
+    return a;
+}
+
+void inv_array_free(InventoryArray *a) {
+    if (!a) return;
+    free(a->items);
+    free(a);
+}
+
+bool inv_array_resize_if_needed(InventoryArray *a) {
+    if (a->size < a->capacity) return true;
+    size_t newcap = (a->capacity == 0) ? 4 : a->capacity * 2;
+    Item *tmp = realloc(a->items, newcap * sizeof(Item));
+    if (!tmp) return false;
+    a->items = tmp;
+    a->capacity = newcap;
+    return true;
+}
+
+bool inv_array_add(InventoryArray *a, const Item *it) {
+    if (!inv_array_resize_if_needed(a)) return false;
+    a->items[a->size++] = *it;
+    return true;
+}
+
+// remove por índice (mantém ordem)
+bool inv_array_remove_at(InventoryArray *a, size_t idx) {
+    if (!a || idx >= a->size) return false;
+    for (size_t i = idx; i + 1 < a->size; ++i) a->items[i] = a->items[i + 1];
+    a->size--;
+    return true;
+}
+
+// busca linear por nome, retorna índice ou -1
+ssize_t inv_array_find_linear(const InventoryArray *a, const char *name, unsigned long *cmp_count) {
+    if (!a) return -1;
+    for (size_t i = 0; i < a->size; ++i) {
+        (*cmp_count)++;
+        if (strcmp(a->items[i].name, name) == 0) return (ssize_t)i;
+    }
+    return -1;
+}
+
+// Selection Sort: podemos sortear por chave: name/type/priority
+typedef enum { SORT_BY_NAME, SORT_BY_TYPE, SORT_BY_PRIORITY } SortKey;
+
+static int cmp_item(const Item *x, const Item *y, SortKey key) {
+    if (key == SORT_BY_NAME) return strcmp(x->name, y->name);
+    if (key == SORT_BY_TYPE) {
+        if (x->type != y->type) return (int)x->type - (int)y->type;
+        return strcmp(x->name, y->name);
+    }
+    // priority
+    if (x->priority != y->priority) return x->priority - y->priority;
+    return strcmp(x->name, y->name);
+}
+
+// selection sort counting comparisons
+void inv_array_selection_sort(InventoryArray *a, SortKey key, unsigned long *cmp_count) {
+    if (!a) return;
+    size_t n = a->size;
+    for (size_t i = 0; i + 1 < n; ++i) {
+        size_t min_idx = i;
+        for (size_t j = i + 1; j < n; ++j) {
+            (*cmp_count)++;
+            if (cmp_item(&a->items[j], &a->items[min_idx], key) < 0) {
+                min_idx = j;
+            }
+        }
+        if (min_idx != i) {
+            Item tmp = a->items[i];
+            a->items[i] = a->items[min_idx];
+            a->items[min_idx] = tmp;
+        }
+    }
+}
+
+// binary search by name in sorted array (name ascending); returns index or -1
+ssize_t inv_array_binary_search_by_name(const InventoryArray *a, const char *name, unsigned long *cmp_count) {
+    if (!a) return -1;
+    ssize_t l = 0, r = (ssize_t)a->size - 1;
+    while (l <= r) {
+        ssize_t m = l + (r - l) / 2;
+        (*cmp_count)++;
+        int c = strcmp(a->items[m].name, name);
+        if (c == 0) return m;
+        if (c < 0) l = m + 1;
+        else r = m - 1;
+    }
+    return -1;
+}
+
+void inv_array_print(const InventoryArray *a) {
+    if (!a) return;
+    printf("InventoryArray (size=%zu):\n", a->size);
+    for (size_t i = 0; i < a->size; ++i) {
+        const Item *it = &a->items[i];
+        printf("  [%zu] %s | %s | prio=%d | qty=%d\n", i, it->name, ItemTypeNames[it->type], it->priority, it->quantity);
+    }
+}
+
+/* -----------------------
+   INVENTÁRIO - LISTA ENCADEADA
+   ----------------------- */
+
+typedef struct Node {
+    Item item;
+    struct Node *next;
+} Node;
+
+typedef struct {
+    Node *head;
+    size_t size;
+} InventoryList;
+
+InventoryList *inv_list_create(void) {
+    InventoryList *L = malloc(sizeof(InventoryList));
+    if (!L) return NULL;
+    L->head = NULL;
+    L->size = 0;
+    return L;
+}
+
+void inv_list_free(InventoryList *L) {
+    if (!L) return;
+    Node *p = L->head;
+    while (p) {
+        Node *n = p->next;
+        free(p);
+        p = n;
+    }
+    free(L);
+}
+
+bool inv_list_add_front(InventoryList *L, const Item *it) {
+    Node *n = malloc(sizeof(Node));
+    if (!n) return false;
+    n->item = *it;
+    n->next = L->head;
+    L->head = n;
+    L->size++;
+    return true;
+}
+
+// Remove primeiro com nome (linear), retorna true se removido
+bool inv_list_remove_by_name(InventoryList *L, const char *name, unsigned long *cmp_count) {
+    Node **pp = &L->head;
+    while (*pp) {
+        (*cmp_count)++;
+        if (strcmp((*pp)->item.name, name) == 0) {
+            Node *to_free = *pp;
+            *pp = (*pp)->next;
+            free(to_free);
+            L->size--;
+            return true;
+        }
+        pp = &(*pp)->next;
+    }
+    return false;
+}
+
+// Busca linear por nome (retorna ponteiro ou NULL)
+Node *inv_list_find(const InventoryList *L, const char *name, unsigned long *cmp_count) {
+    Node *p = L->head;
+    while (p) {
+        (*cmp_count)++;
+        if (strcmp(p->item.name, name) == 0) return p;
+        p = p->next;
+    }
+    return NULL;
+}
+
+void inv_list_print(const InventoryList *L) {
+    printf("InventoryList (size=%zu):\n", L->size);
+    Node *p = L->head;
+    size_t i = 0;
+    while (p) {
+        printf("  [%zu] %s | %s | prio=%d | qty=%d\n", i++, p->item.name, ItemTypeNames[p->item.type], p->item.priority, p->item.quantity);
+        p = p->next;
+    }
+}
+
+/* -----------------------
+   Conversão entre List <-> Array
+   ----------------------- */
+
+InventoryArray *inv_list_to_array(const InventoryList *L) {
+    InventoryArray *a = inv_array_create(L->size ? L->size : 4);
+    Node *p = L->head;
+    while (p) {
+        inv_array_add(a, &p->item);
+        p = p->next;
+    }
+    return a;
+}
+
+InventoryList *inv_array_to_list(const InventoryArray *a) {
+    InventoryList *L = inv_list_create();
+    // preserva ordem: inserir em ordem (append). simplest: add_front and reverse later
+    for (size_t i = 0; i < a->size; ++i) inv_list_add_front(L, &a->items[a->size - 1 - i]);
+    return L;
+}
+
+/* -----------------------
+   Utilitários e simulação de fases
+   ----------------------- */
+
+Item make_item(const char *name, ItemType type, int prio, int qty) {
+    Item it;
+    strncpy(it.name, name, MAX_NAME - 1);
+    it.name[MAX_NAME - 1] = '\0';
+    it.type = type;
+    it.priority = prio;
+    it.quantity = qty;
+    return it;
+}
+
+// Função que simula comparar desempenho:
+// - conta comparações na busca linear na lista,
+// - busca linear no array,
+// - selection sort na array,
+// - busca binária na array ordenada.
+void compare_algorithms_demo(InventoryList *L) {
+    printf("\n--- Comparação: Lista encadeada vs Vetor ---\n");
+    unsigned long cmp_list_find = 0, cmp_array_find_linear = 0, cmp_sort = 0, cmp_bsearch = 0;
+
+    // converte lista para array para testar sort/search
+    InventoryArray *arr = inv_list_to_array(L);
+
+    // busca por um item "Alvo"
+    const char *target = "Rope"; // suponha que estamos procurando por 'Rope'
+    Node *foundNode = inv_list_find(L, target, &cmp_list_find);
+    ssize_t idx_lin = inv_array_find_linear(arr, target, &cmp_array_find_linear);
+
+    printf("Procura (linear) por \"%s\": lista: %s (comparacoes=%lu), array linear: %s (comparacoes=%lu)\n",
+           target, foundNode ? "ENCONTRADO" : "NAO", cmp_list_find,
+           idx_lin >= 0 ? "ENCONTRADO" : "NAO", cmp_array_find_linear);
+
+    // Sort (selection) por nome no array e contar comparações
+    inv_array_selection_sort(arr, SORT_BY_NAME, &cmp_sort);
+    printf("Selection Sort no array (por nome) -> comparacoes=%lu\n", cmp_sort);
+
+    // Busca binária (após sort)
+    ssize_t idx_bin = inv_array_binary_search_by_name(arr, target, &cmp_bsearch);
+    printf("Busca binaria por \"%s\" no array ordenado -> %s (comparacoes=%lu)\n",
+           target, idx_bin >= 0 ? "ENCONTRADO" : "NAO", cmp_bsearch);
+
+    inv_array_free(arr);
+}
+
+/* -----------------------
+   Simulação das fases do jogo
+   ----------------------- */
+
+void phase1_arrival(InventoryArray *a, InventoryList *L) {
+    printf("\n=== Fase 1: Chegada à ilha ===\n");
+    // items aleatórios iniciais disponíveis
+    Item items[] = {
+        make_item("Apple", IT_FOOD, 3, 3),
+        make_item("Stick", IT_TOOL, 5, 2),
+        make_item("Stone", IT_MISC, 6, 5),
+        make_item("Rope", IT_TOOL, 2, 1),
+        make_item("Knife", IT_WEAPON, 1, 1)
+    };
+    size_t n = sizeof(items) / sizeof(items[0]);
+    for (size_t i = 0; i < n; ++i) {
+        inv_array_add(a, &items[i]);
+        inv_list_add_front(L, &items[i]);
+    }
+    printf("Itens coletados ao chegar (adicionados ao inventario):\n");
+    inv_array_print(a);
+}
+
+void phase2_organize(InventoryArray *a, InventoryList *L) {
+    printf("\n=== Fase 2: Organização e comparação de estruturas ===\n");
+    // mostramos listas e comparamos desempenho de operações
+    inv_list_print(L);
+    inv_array_print(a);
+
+    compare_algorithms_demo(L);
+
+    // suposição: o jogador decide ordenar o inventário por prioridade (menor primeiro)
+    unsigned long cmp_sort = 0;
+    inv_array_selection_sort(a, SORT_BY_PRIORITY, &cmp_sort);
+    printf("\nInventario ordenado por prioridade (Selection Sort) comparacoes=%lu:\n", cmp_sort);
+    inv_array_print(a);
+}
+
+void phase3_build_tower(InventoryArray *a, InventoryList *L) {
+    printf("\n=== Fase 3: Construção da Torre de Fuga ===\n");
+    // Requisitos fictícios para construir a torre:
+    // - 1 Rope (Tool)
+    // - 3 Stone (Misc)
+    // - 1 Stick (Tool)
+    // - prioridade: usar itens com menor prioridade (mais importantes) primeiro
+    int need_rope = 1, need_stone = 3, need_stick = 1;
+    int have_rope = 0, have_stone = 0, have_stick = 0;
+
+    // contar no array (inventário final)
+    for (size_t i = 0; i < a->size; ++i) {
+        Item *it = &a->items[i];
+        if (strcmp(it->name, "Rope") == 0) have_rope += it->quantity;
+        if (strcmp(it->name, "Stone") == 0) have_stone += it->quantity;
+        if (strcmp(it->name, "Stick") == 0) have_stick += it->quantity;
+    }
+
+    printf("Recursos: Rope=%d Stone=%d Stick=%d\n", have_rope, have_stone, have_stick);
+    if (have_rope >= need_rope && have_stone >= need_stone && have_stick >= need_stick) {
+        printf("Conseguiu recursos suficientes! Construindo torre...\n");
+        // consumir recursos (remover/atualizar no array)
+        for (size_t i = 0; i < a->size && (need_rope || need_stone || need_stick); ++i) {
+            Item *it = &a->items[i];
+            if (need_rope && strcmp(it->name, "Rope") == 0) {
+                int use = (it->quantity >= need_rope) ? need_rope : it->quantity;
+                it->quantity -= use; need_rope -= use;
+            }
+            if (need_stone && strcmp(it->name, "Stone") == 0) {
+                int use = (it->quantity >= need_stone) ? need_stone : it->quantity;
+                it->quantity -= use; need_stone -= use;
+            }
+            if (need_stick && strcmp(it->name, "Stick") == 0) {
+                int use = (it->quantity >= need_stick) ? need_stick : it->quantity;
+                it->quantity -= use; need_stick -= use;
+            }
+        }
+        printf("Torre construída com sucesso! Você foge da ilha!\n");
+    } else {
+        printf("Faltaram recursos. Ainda não é possível construir a torre de fuga.\n");
+        // sugestão: tentar encontrar mais (simplesmente acrescenta itens)
+        printf("Explorando mais para coletar recursos...\n");
+        // simulando coleta extra:
+        Item extra = make_item("Stone", IT_MISC, 6, 2);
+        inv_array_add(a, &extra);
+        inv_list_add_front(L, &extra);
+        printf("Coletou mais Stone (2).\n");
+        inv_array_print(a);
+    }
+}
+
+/* -----------------------
+   EXEMPLO: testar tudo
+   ----------------------- */
+
+int main(void) {
+    printf("=== Survival Island - demo ===\n");
+
+    InventoryArray *arr = inv_array_create(8);
+    InventoryList *list = inv_list_create();
+
+    // Fase 1: chegada
+    phase1_arrival(arr, list);
+
+    // Fase 2: organizar e comparar algoritmos
+    phase2_organize(arr, list);
+
+    // Fase 3: construir torre de fuga
+    phase3_build_tower(arr, list);
+
+    // mostrar estado final
+    printf("\nEstado final do inventario (array):\n");
+    inv_array_print(arr);
+
+    printf("\nEstado final do inventario (lista):\n");
+    inv_list_print(list);
+
+    // liberar memória
+    inv_array_free(arr);
+    inv_list_free(list);
+
+    return 0;
+}
